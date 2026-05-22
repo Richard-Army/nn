@@ -8,16 +8,7 @@ import os
 import xml.etree.ElementTree as ET
 import time
 import pygame
-
-# Initialize Pygame
-pygame.init()
-screen = pygame.display.set_mode((400, 300))
-
 import carla
-
-# Connect to CARLA server
-client = carla.Client('localhost', 2000)
-client.set_timeout(60.0)
 
 # 全局违章变量
 violation_info = {
@@ -41,7 +32,7 @@ SPEED_LIMIT = 50.0  # 固定限速
 
 
 # Load a different map
-def load_map(map_name):
+def load_map(map_name, client):
     return client.load_world(map_name)
 
 
@@ -135,75 +126,6 @@ def draw_violation_info(img):
                     cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 255), 4)
 
 
-# Define the map you want to load
-world = client.load_world('Town05')
-
-# Set up the simulator in synchronous mode
-settings = world.get_settings()
-settings.synchronous_mode = True
-settings.fixed_delta_seconds = 0.05
-world.apply_settings(settings)
-
-# Initialize Traffic Manager
-traffic_manager = client.get_trafficmanager(8000)
-traffic_manager.set_synchronous_mode(True)
-
-# Get map spawn points
-spawn_points = world.get_map().get_spawn_points()
-
-# Spawn vehicles and walkers
-num_vehicles = 10
-vehicles = spawn_vehicles(num_vehicles, world, spawn_points)
-
-# Get the blueprint library
-bp_lib = world.get_blueprint_library().filter('*')
-
-# Spawn vehicle
-vehicle_bp = bp_lib.find('vehicle.audi.a2')
-try:
-    vehicle = world.try_spawn_actor(vehicle_bp, random.choice(spawn_points))
-    if vehicle is None:
-        raise RuntimeError("Failed to spawn vehicle")
-except Exception as e:
-    print(f"An error occurred: {e}")
-    sys.exit(1)
-
-# Disable Autopilot for manual control
-vehicle.set_autopilot(True, traffic_manager.get_port())
-print("✅ 自动驾驶已启用")
-traffic_manager.ignore_lights_percentage(vehicle, 0.0)
-traffic_manager.vehicle_percentage_speed_difference(vehicle, -50)
-
-# Spawn camera
-camera_bp = bp_lib.find('sensor.camera.rgb')
-camera_bp.set_attribute('image_size_x', '1024')
-camera_bp.set_attribute('image_size_y', '1024')
-camera_bp.set_attribute('fov', '70')
-
-camera_init_trans = carla.Transform(carla.Location(x=1, z=2), carla.Rotation(pitch=-3))
-camera = world.spawn_actor(camera_bp, camera_init_trans, attach_to=vehicle)
-
-# Create a queue to store and retrieve the sensor data
-image_queue = queue.Queue(maxsize=50)
-
-
-# Camera listener
-def image_callback(image):
-    if not image_queue.full():
-        image_queue.put(image)
-
-
-camera.listen(image_callback)
-
-# 保存路径
-current_dirc = os.path.dirname(os.path.abspath(__file__))
-project_root = os.path.abspath(os.path.join(current_dirc, '..', '..', '..'))
-data_path = os.path.join(project_root, "OutPut", "data01")
-output_dir = data_path
-if not os.path.exists(output_dir):
-    os.makedirs(output_dir)
-
-
 # Function to get current weather parameters
 def get_weather_params(world):
     weather = world.get_weather()
@@ -244,24 +166,12 @@ def get_image_point(loc, K, w2c):
     return point_img[0:2]
 
 
-# Get the attributes from the camera
-image_w = camera_bp.get_attribute("image_size_x").as_int()
-image_h = camera_bp.get_attribute("image_size_y").as_int()
-fov = camera_bp.get_attribute("fov").as_float()
-K = build_projection_matrix(image_w, image_h, fov)
-
-DISTANCE_THRESHOLD = 50.0
-captured_sign_locations = set()
-last_capture_time = 0
-capture_cooldown = 5
-
-
 def dot_product(v1, v2):
     return v1.x * v2.x + v1.y * v2.y + v1.z * v2.z
 
 
-def get_signs_bounding_boxes(vehicle_transform, camera_transform, K, world_2_camera):
-    global captured_sign_locations, last_capture_time
+def get_signs_bounding_boxes(vehicle_transform, camera_transform, K, world_2_camera, world, captured_sign_locations,
+                              last_capture_time):
     bounding_boxes = []
     camera_location = camera_transform.location
     vehicle_location = vehicle_transform.location
@@ -272,7 +182,7 @@ def get_signs_bounding_boxes(vehicle_transform, camera_transform, K, world_2_cam
         distance = obj.location.distance(vehicle_location)
         vector_to_object = obj.location - vehicle_location
 
-        if distance < DISTANCE_THRESHOLD:
+        if distance < 50.0:
             right_side_dot_product = dot_product(vehicle_right_vector, vector_to_object)
             if right_side_dot_product > 0:
                 vector_to_camera = obj.location - camera_location
@@ -289,18 +199,18 @@ def get_signs_bounding_boxes(vehicle_transform, camera_transform, K, world_2_cam
                     area = (xmax - xmin) * (ymax - ymin)
                     min_area_threshold = 10
 
-                    if xmin >= 0 and ymin >= 0 and xmax < image_w and ymax < image_h:
+                    if xmin >= 0 and ymin >= 0 and xmax < 1024 and ymax < 1024:
                         aspect_ratio = (xmax - xmin) / float(ymax - ymin) if (ymax - ymin) != 0 else 0
                         if area > min_area_threshold and 0.5 < aspect_ratio < 2.0:
                             bounding_boxes.append(
                                 {'label': 'TrafficSign', 'xmin': xmin, 'ymin': ymin, 'xmax': xmax, 'ymax': ymax})
 
                             current_time = time.time()
-                            if current_time - last_capture_time > capture_cooldown:
+                            if current_time - last_capture_time > 5:
                                 captured_sign_locations.add(sign_location_tuple)
                                 last_capture_time = current_time
 
-    return bounding_boxes
+    return bounding_boxes, captured_sign_locations, last_capture_time
 
 
 # 保存XML
@@ -468,59 +378,152 @@ def non_maximum_suppression(bboxes, iou_threshold=0.2):
     return final_bboxes
 
 
-# 主循环
-weather_transition_interval = 10
-last_weather_change_time = time.time()
-current_condition_index = 0
+def main():
+    """主函数：交通违章检测系统"""
+    # Initialize Pygame
+    pygame.init()
+    screen = pygame.display.set_mode((400, 300))
 
-try:
-    while True:
-        world.tick()
-        time.sleep(0.033)
-        pygame.event.pump()
-        handle_input(vehicle)
+    # Connect to CARLA server
+    client = carla.Client('localhost', 2000)
+    client.set_timeout(60.0)
 
-        image = image_queue.get()
-        img = np.reshape(np.copy(image.raw_data), (image.height, image.width, 4))
-        img_rgb = img[:, :, :3].astype(np.uint8)
+    # Define the map you want to load
+    world = client.load_world('Town05')
 
-        # 违章检测
-        detect_violations(vehicle, img_rgb)
+    # Set up the simulator in synchronous mode
+    settings = world.get_settings()
+    settings.synchronous_mode = True
+    settings.fixed_delta_seconds = 0.05
+    world.apply_settings(settings)
 
-        current_time = time.time()
-        if current_time - last_weather_change_time > weather_transition_interval:
-            current_condition = weather_conditions[current_condition_index]
-            update_weather(world, current_condition)
-            current_condition_index = (current_condition_index + 1) % len(weather_conditions)
-            last_weather_change_time = current_time
+    # Initialize Traffic Manager
+    traffic_manager = client.get_trafficmanager(8000)
+    traffic_manager.set_synchronous_mode(True)
 
-        world_2_camera = np.array(camera.get_transform().get_inverse_matrix())
-        bboxes = get_signs_bounding_boxes(vehicle.get_transform(), camera.get_transform(), K, world_2_camera)
-        bboxes = non_maximum_suppression(bboxes)
+    # Get map spawn points
+    spawn_points = world.get_map().get_spawn_points()
 
-        if bboxes:
-            img_rgb_with_bboxes = img_rgb.copy()
-            for box in bboxes:
-                cv2.rectangle(img_rgb_with_bboxes, (box['xmin'], box['ymin']), (box['xmax'], box['ymax']), (0, 0, 255),
-                              2)
-            draw_violation_info(img_rgb_with_bboxes)
+    # Spawn vehicles and walkers
+    num_vehicles = 10
+    vehicles = spawn_vehicles(num_vehicles, world, spawn_points)
 
-            image_name = f"image_{int(time.time())}.png"
-            cv2.imwrite(os.path.join(output_dir, image_name), img_rgb)
-            create_xml_file(image_name, bboxes, image_w, image_h, get_weather_params(world))
-            cv2.imshow('CARLA - Violation Detection', img_rgb_with_bboxes)
-        else:
-            draw_violation_info(img_rgb)
-            cv2.imshow('CARLA - Violation Detection', img_rgb)
+    # Get the blueprint library
+    bp_lib = world.get_blueprint_library().filter('*')
 
-        if cv2.waitKey(10) & 0xFF == ord('x'):
-            print("X key pressed")
-            break
+    # Spawn vehicle
+    vehicle_bp = bp_lib.find('vehicle.audi.a2')
+    try:
+        vehicle = world.try_spawn_actor(vehicle_bp, random.choice(spawn_points))
+        if vehicle is None:
+            raise RuntimeError("Failed to spawn vehicle")
+    except Exception as e:
+        print(f"An error occurred: {e}")
+        pygame.quit()
+        sys.exit(1)
 
-finally:
-    cv2.destroyAllWindows()
-    vehicle.destroy()
-    camera.destroy()
-    pygame.quit()
-    for v in vehicles:
-        v.destroy()
+    # Disable Autopilot for manual control
+    vehicle.set_autopilot(True, traffic_manager.get_port())
+    print("✅ 自动驾驶已启用")
+    traffic_manager.ignore_lights_percentage(vehicle, 0.0)
+    traffic_manager.vehicle_percentage_speed_difference(vehicle, -50)
+
+    # Spawn camera
+    camera_bp = bp_lib.find('sensor.camera.rgb')
+    camera_bp.set_attribute('image_size_x', '1024')
+    camera_bp.set_attribute('image_size_y', '1024')
+    camera_bp.set_attribute('fov', '70')
+
+    camera_init_trans = carla.Transform(carla.Location(x=1, z=2), carla.Rotation(pitch=-3))
+    camera = world.spawn_actor(camera_bp, camera_init_trans, attach_to=vehicle)
+
+    # Create a queue to store and retrieve the sensor data
+    image_queue = queue.Queue(maxsize=50)
+
+    # Camera listener
+    def image_callback(image):
+        if not image_queue.full():
+            image_queue.put(image)
+
+    camera.listen(image_callback)
+
+    # 保存路径
+    current_dirc = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.abspath(os.path.join(current_dirc, '..', '..', '..'))
+    data_path = os.path.join(project_root, "OutPut", "data01")
+    global output_dir
+    output_dir = data_path
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
+    # Get the attributes from the camera
+    image_w = camera_bp.get_attribute("image_size_x").as_int()
+    image_h = camera_bp.get_attribute("image_size_y").as_int()
+    fov = camera_bp.get_attribute("fov").as_float()
+    K = build_projection_matrix(image_w, image_h, fov)
+
+    captured_sign_locations = set()
+    last_capture_time = 0
+
+    # 主循环
+    weather_transition_interval = 10
+    last_weather_change_time = time.time()
+    current_condition_index = 0
+
+    try:
+        while True:
+            world.tick()
+            time.sleep(0.033)
+            pygame.event.pump()
+            handle_input(vehicle)
+
+            image = image_queue.get()
+            img = np.reshape(np.copy(image.raw_data), (image.height, image.width, 4))
+            img_rgb = img[:, :, :3].astype(np.uint8)
+
+            # 违章检测
+            detect_violations(vehicle, img_rgb)
+
+            current_time = time.time()
+            if current_time - last_weather_change_time > weather_transition_interval:
+                current_condition = weather_conditions[current_condition_index]
+                update_weather(world, current_condition)
+                current_condition_index = (current_condition_index + 1) % len(weather_conditions)
+                last_weather_change_time = current_time
+
+            world_2_camera = np.array(camera.get_transform().get_inverse_matrix())
+            bboxes, captured_sign_locations, last_capture_time = get_signs_bounding_boxes(
+                vehicle.get_transform(), camera.get_transform(), K, world_2_camera,
+                world, captured_sign_locations, last_capture_time)
+            bboxes = non_maximum_suppression(bboxes)
+
+            if bboxes:
+                img_rgb_with_bboxes = img_rgb.copy()
+                for box in bboxes:
+                    cv2.rectangle(img_rgb_with_bboxes, (box['xmin'], box['ymin']), (box['xmax'], box['ymax']),
+                                  (0, 0, 255), 2)
+                draw_violation_info(img_rgb_with_bboxes)
+
+                image_name = f"image_{int(time.time())}.png"
+                cv2.imwrite(os.path.join(output_dir, image_name), img_rgb)
+                create_xml_file(image_name, bboxes, image_w, image_h, get_weather_params(world))
+                cv2.imshow('CARLA - Violation Detection', img_rgb_with_bboxes)
+            else:
+                draw_violation_info(img_rgb)
+                cv2.imshow('CARLA - Violation Detection', img_rgb)
+
+            if cv2.waitKey(10) & 0xFF == ord('x'):
+                print("X key pressed")
+                break
+
+    finally:
+        cv2.destroyAllWindows()
+        vehicle.destroy()
+        camera.destroy()
+        pygame.quit()
+        for v in vehicles:
+            v.destroy()
+
+
+if __name__ == '__main__':
+    main()

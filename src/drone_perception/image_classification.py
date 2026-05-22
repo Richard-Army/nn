@@ -7,24 +7,17 @@ import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms, models
 
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 # 设置设备
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"使用设备: {device}")
 
 # 路径设置
 base_dir = "./data"  # 修改为你的数据目录
 train_dir = os.path.join(base_dir, "train")
 test_dir = os.path.join(base_dir, "test")
-
-# 检查路径是否存在
-print("=" * 50)
-print("路径检查:")
-print(f"基础目录: {base_dir}, 存在: {os.path.exists(base_dir)}")
-print(f"训练目录: {train_dir}, 存在: {os.path.exists(train_dir)}")
-print(f"测试目录: {test_dir}, 存在: {os.path.exists(test_dir)}")
-print("=" * 50)
 
 # 参数配置
 img_size = (128, 128)
@@ -41,11 +34,8 @@ class ImageDataset(Dataset):
         self.labels = []
         self.class_to_idx = {}
         
-        print(f"\n正在初始化数据集: {data_dir}")
-        
         # 检查数据目录是否存在
         if not os.path.exists(data_dir):
-            print(f"错误: 数据目录 {data_dir} 不存在!")
             return
         
         # 遍历目录获取图像和标签
@@ -53,13 +43,10 @@ class ImageDataset(Dataset):
                          if os.path.isdir(os.path.join(data_dir, d))])
         
         if not classes:
-            print(f"警告: 在 {data_dir} 中没有找到任何类别文件夹!")
             return
         
         self.class_to_idx = {cls_name: i for i, cls_name in enumerate(classes)}
-        print(f"找到类别: {self.class_to_idx}")
         
-        total_images = 0
         for class_name in classes:
             class_dir = os.path.join(data_dir, class_name)
             class_images = []
@@ -71,13 +58,8 @@ class ImageDataset(Dataset):
                     img_path = os.path.join(class_dir, img_name)
                     class_images.append(img_path)
             
-            print(f"类别 '{class_name}': 找到 {len(class_images)} 张图片")
-            
             self.images.extend(class_images)
             self.labels.extend([self.class_to_idx[class_name]] * len(class_images))
-            total_images += len(class_images)
-        
-        print(f"数据集总计: {total_images} 张图片")
     
     def __len__(self):
         return len(self.images)
@@ -95,7 +77,6 @@ class ImageDataset(Dataset):
             
             return image, label
         except Exception as e:
-            print(f"加载图像失败: {img_path}, 错误: {e}")
             # 返回一个黑色图像作为占位符
             image = Image.new('RGB', (128, 128), color='black')
             if self.transform:
@@ -119,39 +100,6 @@ test_transform = transforms.Compose([
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 ])
 
-# 创建数据集
-print("\n" + "=" * 50)
-print("创建数据集...")
-train_dataset = ImageDataset(train_dir, transform=train_transform)
-test_dataset = ImageDataset(test_dir, transform=test_transform)
-
-# 检查数据集是否为空
-if len(train_dataset) == 0:
-    print("\n错误: 训练集为空!")
-    print("请检查:")
-    print("1. data/train/ 目录是否存在")
-    print("2. data/train/ 下面是否有类别文件夹（如 cat/, dog/ 等）")
-    print("3. 类别文件夹中是否有图片文件")
-    print("4. 图片格式是否支持（jpg, png, jpeg 等）")
-    exit(1)
-
-if len(test_dataset) == 0:
-    print("\n警告: 测试集为空!")
-
-# 确定类别数量
-num_classes = len(train_dataset.class_to_idx)
-print(f"\n检测到 {num_classes} 个类别: {train_dataset.class_to_idx}")
-print(f"训练集样本数: {len(train_dataset)}")
-print(f"测试集样本数: {len(test_dataset)}")
-
-# 创建数据加载器
-train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
-
-print(f"训练集批次数量: {len(train_loader)}")
-print(f"测试集批次数量: {len(test_loader)}")
-
-# 构建模型（使用预训练的ResNet18）
 # 构建模型（使用预训练的ResNet18）
 class ImageClassifier(nn.Module):
     def __init__(self, num_classes):
@@ -181,18 +129,8 @@ class ImageClassifier(nn.Module):
     def forward(self, x):
         return self.backbone(x)
 
-# 初始化模型
-model = ImageClassifier(num_classes=num_classes).to(device)
-
-# 定义损失函数和优化器
-criterion = nn.CrossEntropyLoss()
-optimizer = optim.Adam(model.parameters(), lr=0.001)
-
-# 学习率调度器
-scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.1)
-
 # 训练函数
-def train_model(model, train_loader, test_loader, epochs, patience=5):
+def train_model(model, train_loader, test_loader, criterion, optimizer, scheduler, epochs, base_dir, patience=5):
     best_accuracy = 0.0
     patience_counter = 0
     train_losses = []
@@ -260,31 +198,86 @@ def train_model(model, train_loader, test_loader, epochs, patience=5):
     
     return train_losses, val_accuracies
 
-# 训练模型
-print("\n" + "=" * 50)
-print("开始训练模型...")
-train_losses, val_accuracies = train_model(model, train_loader, test_loader, epochs)
+def main():
+    """主函数：训练图像分类模型"""
+    print(f"使用设备: {device}")
+    
+    print("=" * 50)
+    print("路径检查:")
+    print(f"基础目录: {base_dir}, 存在: {os.path.exists(base_dir)}")
+    print(f"训练目录: {train_dir}, 存在: {os.path.exists(train_dir)}")
+    print(f"测试目录: {test_dir}, 存在: {os.path.exists(test_dir)}")
+    print("=" * 50)
+    
+    # 创建数据集
+    print("\n" + "=" * 50)
+    print("创建数据集...")
+    train_dataset = ImageDataset(train_dir, transform=train_transform)
+    test_dataset = ImageDataset(test_dir, transform=test_transform)
+    
+    # 检查数据集是否为空
+    if len(train_dataset) == 0:
+        print("\n错误: 训练集为空!")
+        print("请检查:")
+        print("1. data/train/ 目录是否存在")
+        print("2. data/train/ 下面是否有类别文件夹（如 cat/, dog/ 等）")
+        print("3. 类别文件夹中是否有图片文件")
+        print("4. 图片格式是否支持（jpg, png, jpeg 等）")
+        return
+    
+    if len(test_dataset) == 0:
+        print("\n警告: 测试集为空!")
+    
+    # 确定类别数量
+    num_classes = len(train_dataset.class_to_idx)
+    print(f"\n检测到 {num_classes} 个类别: {train_dataset.class_to_idx}")
+    print(f"训练集样本数: {len(train_dataset)}")
+    print(f"测试集样本数: {len(test_dataset)}")
+    
+    # 创建数据加载器
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+    
+    print(f"训练集批次数量: {len(train_loader)}")
+    print(f"测试集批次数量: {len(test_loader)}")
+    
+    # 初始化模型
+    model = ImageClassifier(num_classes=num_classes).to(device)
+    
+    # 定义损失函数和优化器
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.Adam(model.parameters(), lr=0.001)
+    
+    # 学习率调度器
+    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.1)
+    
+    # 训练模型
+    print("\n" + "=" * 50)
+    print("开始训练模型...")
+    train_losses, val_accuracies = train_model(model, train_loader, test_loader, criterion, optimizer, scheduler, epochs, base_dir)
+    
+    # 保存最终模型
+    torch.save(model.state_dict(), os.path.join(base_dir, "final_model.pth"))
+    
+    # 绘制训练曲线
+    plt.figure(figsize=(12, 4))
+    plt.subplot(1, 2, 1)
+    plt.plot(train_losses)
+    plt.title('Training Loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    
+    plt.subplot(1, 2, 2)
+    plt.plot(val_accuracies)
+    plt.title('Validation Accuracy')
+    plt.xlabel('Epoch')
+    plt.ylabel('Accuracy')
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(base_dir, "training_plot.png"))
+    plt.close()
+    
+    print("模型训练完成！")
 
-# 保存最终模型
-torch.save(model.state_dict(), os.path.join(base_dir, "final_model.pth"))
-
-# 绘制训练曲线
-plt.figure(figsize=(12, 4))
-plt.subplot(1, 2, 1)
-plt.plot(train_losses)
-plt.title('Training Loss')
-plt.xlabel('Epoch')
-plt.ylabel('Loss')
-
-plt.subplot(1, 2, 2)
-plt.plot(val_accuracies)
-plt.title('Validation Accuracy')
-plt.xlabel('Epoch')
-plt.ylabel('Accuracy')
-
-plt.tight_layout()
-plt.savefig(os.path.join(base_dir, "training_plot.png"))
-plt.close()
-
-print("模型训练完成！")
-
+if __name__ == '__main__':
+    main()
